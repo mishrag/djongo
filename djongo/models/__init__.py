@@ -2,9 +2,9 @@ from django.db.models import __all__ as django_models
 from django.db.models import *
 
 from .fields import (
-    ArrayField, ListField, DjongoManager,
+    ArrayField, DjongoManager,
     EmbeddedField, ArrayReferenceField, ObjectIdField,
-    GenericObjectIdField, DictField
+    GenericObjectIdField
 )
 
 from .lookups import (
@@ -12,7 +12,7 @@ from .lookups import (
 )
 
 __all__ = django_models + [
-    'DjongoManager', 'ListField', 'ArrayField',
+    'DjongoManager', 'ArrayField',
     'EmbeddedField', 'ArrayReferenceField', 'ObjectIdField',
-    'GenericObjectIdField', 'DictField'
+    'GenericObjectIdField'
 ]

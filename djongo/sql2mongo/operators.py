@@ -7,7 +7,7 @@ from json import JSONDecodeError
 from sqlparse import tokens, parse as sqlparse
 from sqlparse.sql import Token, Parenthesis, Comparison, IdentifierList, Identifier, Function
 
-from . import SQLDecodeError
+from ..exceptions import SQLDecodeError
 from .sql_tokens import SQLToken, SQLStatement
 from . import query
 
