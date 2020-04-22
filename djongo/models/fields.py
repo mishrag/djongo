@@ -31,7 +31,6 @@ from django.utils.functional import cached_property
 from django.utils.html import format_html_join, format_html
 from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
-
 from djongo.exceptions import NotSupportedError, print_warn
 
 
@@ -72,12 +71,32 @@ class DjongoManager(Manager):
                 .db_conn[self.model._meta.db_table])
 
 
-class FormlessField(Field):
+class MongoField(Field):
+    empty_strings_allowed = False
+
+
+class JSONField(MongoField):
+    def get_prep_value(self, value):
+        if not isinstance(value, (dict, list)):
+            raise ValueError(
+                f'Value: {value} must be of type dict/list'
+            )
+        return value
+
+    def to_python(self, value):
+        if not isinstance(value, (dict, list)):
+            raise ValueError(
+                f'Value: {value} stored in DB must be of type dict/list'
+                'Did you miss any Migrations?'
+            )
+        return value
+
+
+class ModelField(MongoField):
     """
     Allows for the inclusion of an instance of an abstract model as
     a field inside a document.
     """
-    empty_strings_allowed = False
     base_type = dict
 
     def __init__(self,
@@ -180,13 +199,19 @@ class FormlessField(Field):
         kwargs['model_container'] = self.model_container
         return name, path, args, kwargs
 
-    def get_prep_value(self, value):
+    def get_db_prep_save(self, value, connection):
         if value is None:
             return None
 
         if not isinstance(value, self.base_type):
             raise ValueError(
                 f'Value: {value} must be an instance of {self.base_type}')
+        return self.get_prep_value(value)
+
+    def get_prep_value(self, value):
+        if (value is None or
+                not isinstance(value, self.base_type)):
+            return value
 
         processed_value = self._value_thru_fields('get_prep_value',
                                                   value)
@@ -215,7 +240,7 @@ class FormlessField(Field):
         return processed_value
 
 
-class MongoField(FormlessField):
+class FormedField(ModelField):
 
     def __init__(self,
                  model_container: typing.Type[Model],
@@ -250,7 +275,7 @@ class MongoField(FormlessField):
         return super().formfield(**defaults)
 
 
-class ArrayField(MongoField):
+class ArrayField(FormedField):
     """
     Implements an array of objects inside the document.
 
@@ -306,7 +331,7 @@ class ArrayField(MongoField):
         return processed_value
 
     def validate(self, value, model_instance, validate_parent=True):
-        super(FormlessField, self).validate(value, model_instance)
+        super(ModelField, self).validate(value, model_instance)
         for _dict in value:
             super().validate(_dict, model_instance, validate_parent=False)
 
@@ -459,7 +484,7 @@ class ArrayFormWidget(forms.Widget):
         return True
 
 
-class EmbeddedField(MongoField):
+class EmbeddedField(FormedField):
     pass
 
 
