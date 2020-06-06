@@ -97,7 +97,7 @@ class ModelField(MongoField):
     Allows for the inclusion of an instance of an abstract model as
     a field inside a document.
     """
-    base_type = dict
+    base_types = dict,
 
     def __init__(self,
                  model_container: typing.Type[Model],
@@ -127,72 +127,61 @@ class ModelField(MongoField):
                     f'This version of djongo does not support indexes on embedded fields'
                 )
 
-    def _value_thru_fields(self,
-                           func_name: str,
-                           value: dict,
-                           *other_args):
-        processed_value = {}
-        errors = {}
+    def _validate_model(self, model_value):
+        # Run validations on all fields of the model now
         for field in self.model_container._meta.get_fields():
-            try:
-                try:
-                    field_value = value[field.attname]
-                except KeyError:
-                    raise ValidationError(f'Value for field "{field}" not supplied')
-                processed_value[field.attname] = getattr(field, func_name)(field_value, *other_args)
-            except ValidationError as e:
-                errors[field.name] = e.error_list
+            field_value = getattr(model_value, field.attname, None)
+            field.validate(field_value, model_value)
 
-        if errors:
-            e = ValidationError(errors)
-            raise ValidationError(str(e))
+    def _get_model_string_value(self, model_value):
+        return {
+            field.attname: field.value_to_string(model_value)
+            for field in self.model_container._meta.get_fields()
+        }
 
-        return processed_value
-
-    def _obj_thru_fields(self,
-                         func_name: str,
-                         obj: Model,
-                         *other_args):
-        processed_value = {}
-        for field in self.model_container._meta.get_fields():
-            processed_value[field.attname] = getattr(field, func_name)(obj, *other_args)
-        return processed_value
-
-    def _value_thru_container(self, value):
-        processed_value = {}
-        inst = self.model_container(**value)
-        for field in self.model_container._meta.get_fields():
-            processed_value[field.attname] = getattr(inst, field.attname)
-        return processed_value
-
-    def validate(self, value, model_instance, validate_parent=True):
-        if validate_parent:
-            super().validate(value, model_instance)
+    def validate(self, value, model_instance):
+        super().validate(value, model_instance)
 
         if value is None:
-            super().validate(value, model_instance)
+            # Nothing to validate
             return
 
-        container_instance = self.model_container(**value)
-        self._value_thru_fields('validate', value, container_instance)
+        if not isinstance(value, self.base_types) and not isinstance(value, self.model_container):
+            raise ValidationError("%s neither a %s not an instance of %s. Found: %s" % (
+                str(self), self.base_types, self.model_container.__name__, type(value)
+            ))
+
+        if isinstance(value, (list, set)):
+            [self._validate_model(v) for v in value]
+        else:
+            self._validate_model(value)
+
+    def pre_save(self, model_instance, add):
+        return {"value": getattr(model_instance, self.attname)}
 
     def value_to_string(self, obj):
         value = self.value_from_object(obj)
         if value is None:
-            raise TypeError(f'Type: {type(value)} cannot be serialized')
+            return None
 
-        container_obj = self.model_container(**value)
-        processed_value = self._obj_thru_fields('value_to_string', container_obj)
+        processed_value = self._get_model_string_value(value)
         return json.dumps(processed_value)
 
     def value_from_object(self, obj):
         value = super().value_from_object(obj)
+
         if value is None:
             return None
 
-        container_obj = self.model_container(**value)
-        processed_value = self._obj_thru_fields('value_from_object', container_obj)
-        return processed_value
+        if isinstance(value, self.base_types):
+            return value
+
+        if not isinstance(value, self.model_container):
+            raise ValidationError("%s should be an instance of %s, but found %s" % (
+                str(self), self.model_container.__name__, type(value)
+            ))
+
+        return value
 
     def deconstruct(self):
         name, path, args, kwargs = super().deconstruct()
@@ -200,44 +189,78 @@ class ModelField(MongoField):
         return name, path, args, kwargs
 
     def get_db_prep_save(self, value, connection):
+        if not isinstance(value, dict):
+            raise ValueError(f'Value: {value} must be an instance of {self.base_types}')
+
+        if "value" not in value:
+            raise ValueError(f'Value: {value} must be an instance of {self.base_types} with one key')
+
+        value = value["value"]
         if value is None:
             return None
 
-        if not isinstance(value, self.base_type):
-            raise ValueError(
-                f'Value: {value} must be an instance of {self.base_type}')
         return self.get_prep_value(value)
 
-    def get_prep_value(self, value):
-        if (value is None or
-                not isinstance(value, self.base_type)):
-            return value
+    def _get_db_prep_value_for_model(self, value):
+        if not isinstance(value, self.model_container):
+            raise ValidationError("%s should be an instance of %s, but found %s" % (
+                str(self), self.model_container.__name__, type(value).__name__
+            ))
 
-        processed_value = self._value_thru_fields('get_prep_value',
-                                                  value)
+        processed_value = {}
+        errors = {}
+        for field in self.model_container._meta.get_fields():
+            try:
+                field_value = getattr(value, field.attname, None)
+                processed_value[field.attname] = field.get_prep_value(field_value)
+            except ValidationError as e:
+                errors[field.name] = e.error_list
+
+        return processed_value, errors
+
+    def get_prep_value(self, value):
+        if isinstance(value, (list, set)):
+            processed_value, errors = [], []
+            for v in value:
+                processed, err = self._get_db_prep_value_for_model(v)
+                processed_value.append(processed)
+                if err:
+                    errors += err
+        else:
+            processed_value, errors = self._get_db_prep_value_for_model(value)
+
+        if errors:
+            e = ValidationError(errors)
+            raise ValidationError(str(e))
+
         return processed_value
 
     def from_db_value(self, value, expression, connection, context):
         return self.to_python(value)
 
+    def _generate_model_instance(self, value):
+        instance = self.model_container()
+        for field in self.model_container._meta.get_fields():
+            if field.attname not in value:
+                continue
+            field_value = value[field.attname]
+            setattr(instance, field.attname, field.to_python(field_value))
+        return instance
+
     def to_python(self, value):
-        """
-        Overrides Django's default to_python to allow correct
-        translation to instance.
-        """
         if value is None:
             return None
 
         if isinstance(value, str):
             value = json.loads(value)
 
-        if not isinstance(value, self.base_type):
-            raise ValidationError(
-                f'Value: {value} must be an instance of {self.base_type}')
+        if not isinstance(value, self.base_types):
+            raise ValidationError(f'Value: {value} must be an instance of {self.base_types}')
 
-        value = self._value_thru_container(value)
-        processed_value = self._value_thru_fields('to_python', value)
-        return processed_value
+        if isinstance(value, (list, set)):
+            return [self._generate_model_instance(v) for v in value]
+        else:
+            return self._get_db_prep_value_for_model(value)
 
 
 class FormedField(ModelField):
@@ -287,53 +310,20 @@ class ArrayField(FormedField):
     not be treated as a collection of its own.
     """
     empty_strings_allowed = False
-    base_type = list
-
-    def _value_thru_container(self, value):
-        post_value = []
-        for _dict in value:
-            post_value.append(super()._value_thru_container(_dict))
-        return post_value
-
-    def _value_thru_fields(self,
-                           func_name: str,
-                           value: typing.Union[list, dict],
-                           *other_args):
-        if isinstance(value, dict):
-            return super()._value_thru_fields(func_name,
-                                              value,
-                                              *other_args)
-
-        processed_value = []
-        for pre_dict in value:
-            post_dict = super()._value_thru_fields(func_name,
-                                                   pre_dict,
-                                                   *other_args)
-            processed_value.append(post_dict)
-        return processed_value
+    base_types = (list, set)
 
     def value_to_string(self, obj):
         value = self.value_from_object(obj)
-        processed_value = []
-        for _dict in value:
-            container_obj = self.model_container(**_dict)
-            post_dict = self._obj_thru_fields('value_to_string', container_obj)
-            processed_value.append(post_dict)
-        return json.dumps(processed_value)
 
-    def value_from_object(self, obj):
-        value = getattr(obj, self.attname)
-        processed_value = []
-        for _dict in value:
-            container_obj = self.model_container(**_dict)
-            post_dict = self._obj_thru_fields('value_from_object', container_obj)
-            processed_value.append(post_dict)
-        return processed_value
+        if value is None:
+            return None
 
-    def validate(self, value, model_instance, validate_parent=True):
-        super(ModelField, self).validate(value, model_instance)
-        for _dict in value:
-            super().validate(_dict, model_instance, validate_parent=False)
+        if not isinstance(value, self.base_types):
+            raise ValueError("%s neither a %s not an instance of %s. Found: %s" % (
+                str(self), self.base_types, self.model_container.__name__, type(value)
+            ))
+
+        return json.dumps([self._get_model_string_value(v) for v in value])
 
 
 def _get_model_form_class(model_form_class, model_container, admin, request):
