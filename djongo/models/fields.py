@@ -239,6 +239,14 @@ class ModelField(MongoField):
         return self.to_python(value)
 
     def _generate_model_instance(self, value):
+        if isinstance(value, self.model_container):
+            return value
+
+        if not isinstance(value, dict):
+            raise ValueError("%s: Cannot convert a %s to %s" % (
+                self.attname, type(value).__name__, self.model_container.__name__
+            ))
+
         instance = self.model_container()
         for field in self.model_container._meta.get_fields():
             if field.attname not in value:
@@ -254,13 +262,10 @@ class ModelField(MongoField):
         if isinstance(value, str):
             value = json.loads(value)
 
-        if not isinstance(value, self.base_types):
-            raise ValidationError(f'Value: {value} must be an instance of {self.base_types}')
-
         if isinstance(value, (list, set)):
             return [self._generate_model_instance(v) for v in value]
         else:
-            return self._get_db_prep_value_for_model(value)
+            return self._generate_model_instance(value)
 
 
 class FormedField(ModelField):
