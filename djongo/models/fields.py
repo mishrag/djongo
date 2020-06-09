@@ -167,22 +167,6 @@ class ModelField(MongoField):
         processed_value = self._get_model_string_value(value)
         return json.dumps(processed_value)
 
-    def value_from_object(self, obj):
-        value = super().value_from_object(obj)
-
-        if value is None:
-            return None
-
-        if isinstance(value, self.base_types):
-            return value
-
-        if not isinstance(value, self.model_container):
-            raise ValidationError("%s should be an instance of %s, but found %s" % (
-                str(self), self.model_container.__name__, type(value)
-            ))
-
-        return value
-
     def deconstruct(self):
         name, path, args, kwargs = super().deconstruct()
         kwargs['model_container'] = self.model_container
@@ -202,6 +186,9 @@ class ModelField(MongoField):
         return self.get_prep_value(value)
 
     def _get_db_prep_value_for_model(self, value):
+        if value is None:
+            return None, None
+
         if not isinstance(value, self.model_container):
             raise ValidationError("%s should be an instance of %s, but found %s" % (
                 str(self), self.model_container.__name__, type(value).__name__
@@ -267,6 +254,13 @@ class ModelField(MongoField):
         else:
             return self._generate_model_instance(value)
 
+    def instance_from_model_value(self, model_value):
+        instance = self.model_container()
+        for field in self.model_container._meta.fields:
+            field_val = field.value_from_object(model_value)
+            setattr(instance, field.name, field_val)
+        return instance
+
 
 class FormedField(ModelField):
 
@@ -329,6 +323,16 @@ class ArrayField(FormedField):
             ))
 
         return json.dumps([self._get_model_string_value(v) for v in value])
+
+    def value_from_object(self, obj):
+        value = super().value_from_object(obj)
+        if value is None:
+            return value
+        if not isinstance(value, self.base_types):
+            raise ValueError("Invalid value " % value)
+        if len(value) == 0:
+            return []
+        return [self.instance_from_model_value(v) for v in value]
 
 
 def _get_model_form_class(model_form_class, model_container, admin, request):
@@ -480,7 +484,17 @@ class ArrayFormWidget(forms.Widget):
 
 
 class EmbeddedField(FormedField):
-    pass
+
+    def __init__(self, *args, **kwargs):
+        if 'null' not in kwargs:
+            kwargs['null'] = True
+        super().__init__(*args, **kwargs)
+
+    def value_from_object(self, obj):
+        value = super().value_from_object(obj)
+        if value is None:
+            return None
+        return self.instance_from_model_value(value)
 
 
 class EmbeddedFormField(forms.MultiValueField):
