@@ -83,7 +83,7 @@ class JSONField(MongoField):
 
         if not isinstance(value, (dict, list)):
             raise ValueError(
-                f'Value: {value} must be of type dict/list'
+                f'Value: {value} must be of type dict/list for field {self.name}'
             )
         return value
 
@@ -93,7 +93,7 @@ class JSONField(MongoField):
                 return self.default
         if not isinstance(value, (dict, list)):
             raise ValueError(
-                f'Value: {value} stored in DB must be of type dict/list'
+                f'Value: {value} stored in DB must be of type dict/list for field {self.name}'
                 'Did you miss any Migrations?'
             )
         return value
